@@ -8,12 +8,43 @@ from genie.testbed import load
 import pynetbox, urllib3, re, random
 from ipaddress import ip_network
 
-
-
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning) # HTTP Warnung ausmachen
-nb = pynetbox.api(url="<NEBTOX_URL>", token="<TOKEN>") # Netbox API Verbindung
+nb = pynetbox.api(url="<NETBOX URL>", token="<TOKEN>") # Netbox API Verbindung
 nb.http_session.verify = False # Keine Zertifikate checken
-tb = load('tb.yaml') # Testbed laden
+
+# ---- Funktion um Testbed zu erstellen ----
+def MakeTestbed():
+        # Unser Default testbed mit Zugangsdaten
+        tb = {
+                "testbed": {
+                        "name": "NetboxTestbed",
+                        "credentials": {
+                                "default": {
+                                        "username": "<USERNAME>",
+                                        "password": "<PASSWORD>"
+                                }
+                        }
+                },
+                "devices": {}
+        }
+
+        nb_switches = nb.dcim.devices.filter(role_id=1)
+        for switch in nb_switches:
+                # Switche unter devices in das Testbed einfügen
+                primary_ip = switch.primary_ip4.address.split('/')[0] if switch.primary_ip4 else '0.0.0.0'
+                tb["devices"][switch.name] = {
+                        "type": "switch",
+                        "os": "ios",
+                        "connections": {
+                                "cli": {
+                                        "protocol": "ssh",
+                                        "ip": primary_ip
+                                }
+                        }
+                }
+
+        return tb
+
 
 # ---- Funktion um Site ID zu setzen ----
 def setSite(prefix_nb, prefix_str):
@@ -67,7 +98,7 @@ def pickColor():
         'FFD3B5',  # Light Apricot
         ]
         available_colors = [color for color in colors if color not in used_colors]
-        if not available_colors:
+        if not available_colors: # muss gemacht werden, seed ändern hat nicht funktioniert
                 used_colors = []
                 available_colors = colors
         color = random.choice(colors).lower() # Netbox entwickler finden sich schlau kleinschreibung zu enforcen (ノ#-_-)ノ ミ┴┴
@@ -77,7 +108,7 @@ def pickColor():
 # ---- Funktion um halbverbundene Kabel zu entfernen ----
 def removeLooseCables():
         print(f"[*] Removing all loose cables...")
-        # Check if there are any cables with only one termination or none at all
+        # Schauen ob es Kabel mit unvollständigen Terminierungen gibt und diese löschen
         cables = nb.dcim.cables.all()
         for cable in cables:
                 if not cable.a_terminations or not cable.b_terminations:
@@ -90,10 +121,14 @@ def discoverCiscoDevice(nb,tb,device_name):
         # ---- Verbindung zum Gerät aufbauen und Daten sammeln ----
         print(f"[*] Connecting to {device_name}...")
         dev = tb.devices[device_name]
-        dev.connect(goto_enable=False,
-        log_stdout=False,
-        init_exec_commands=[],
-        init_config_commands=[])
+        try:
+            dev.connect(goto_enable=False,
+                        log_stdout=False,
+                        init_exec_commands=[],
+                        init_config_commands=[])
+        except Exception as e:
+            print(f"[-] Error connecting to {device_name}")
+            return
 
         # ---- Befehle auf dem Gerät ausführen und Daten parsen ----
         print(f"[*] Executing commands and parsing data...")
@@ -180,7 +215,7 @@ def discoverCiscoDevice(nb,tb,device_name):
 
         # Objekt für das Gerät aus Netbox holen
         host = nb.dcim.devices.get(name=hostname)
-
+        print(f"Host ID: {host.id} Primary IP: {host.primary_ip4}")
         # Wenn Gerät in Netbox existiert, dann Daten updaten, ansonsten erstellen
         if host:
                 print(f"[*] Device {hostname} is already in netbox, updating data")
@@ -246,8 +281,9 @@ def discoverCiscoDevice(nb,tb,device_name):
         for index, device_info in cdppar['index'].items():
                 # Daten aus CDP Nachbar extrahieren und korrekt formatieren
                 cdp_device_id = device_info.get('device_id', 'N/A')
+                cdp_device_id = cdp_device_id # .rstrip('.domain.ad') Wenn du eine AD Domäne im Namen von erkannten Geräten hast, dann kannst du das hier benutzen
                 cdp_device_role = device_info.get('capabilities', 'N/A')
-                cdp_device_role_slug = cdp_device_role.lower().replace(' ', '_')
+                cdp_device_role_slug = cdp_device_role.replace(' ', '_')
                 cdp_device_type = device_info.get('platform', 'N/A').replace('cisco ', '')
                 cdp_device_type_slug = cdp_device_type.replace(' ', '_')
                 cdp_platform = re.sub('^WS-', '', cdp_device_type).split('-')[0]
@@ -258,23 +294,23 @@ def discoverCiscoDevice(nb,tb,device_name):
                         cdp_mgmt_ip = next(iter(management_addresses))
 
                 # Wenn Platform in Netbox existieren, dann ID holen, ansonsten erstellen
-                if not nb.dcim.platforms.filter(slug=cdp_platform.lower()):
+                if not nb.dcim.platforms.filter(slug=cdp_platform):
                         print(f"[+] Platform {cdp_platform} not in Netbox, creating it now")
-                        nb.dcim.platforms.create(name=cdp_platform, slug=cdp_platform.lower())
-                        tmp = nb.dcim.platforms.get(slug=cdp_platform.lower())
+                        nb.dcim.platforms.create(name=cdp_platform, slug=cdp_platform)
+                        tmp = nb.dcim.platforms.get(slug=cdp_platform)
                         pf = tmp.id
                 else:
-                        tmp = nb.dcim.platforms.get(slug=cdp_platform.lower())
+                        tmp = nb.dcim.platforms.get(slug=cdp_platform)
                         pf = tmp.id
 
                 # Hier dasselbe für Device Type
-                if not nb.dcim.device_types.filter(slug=cdp_device_type_slug.lower()):
+                if not nb.dcim.device_types.filter(slug=cdp_device_type_slug):
                         print(f"[+] Device Type {cdp_device_type} not in Netbox, creating it now")
-                        nb.dcim.device_types.create(model=cdp_device_type, slug=cdp_device_type_slug.lower(), manufacturer=1)
-                        tmp = nb.dcim.device_types.get(slug=cdp_device_type_slug.lower())
+                        nb.dcim.device_types.create(model=cdp_device_type, slug=cdp_device_type_slug, manufacturer=1)
+                        tmp = nb.dcim.device_types.get(slug=cdp_device_type_slug)
                         dt = tmp.id
                 else:
-                        tmp = nb.dcim.device_types.get(slug=cdp_device_type_slug.lower())
+                        tmp = nb.dcim.device_types.get(slug=cdp_device_type_slug)
                         dt = tmp.id
 
                 # Wenn IP Adresse des Nachbarn in Netbox nicht existiert, dann erstellen
@@ -287,13 +323,16 @@ def discoverCiscoDevice(nb,tb,device_name):
                 cdp_ipint = nb.ipam.ip_addresses.get(address=cdp_mgmt_ip+"/24")
 
                 # 'Capabilities' als Device Role in Netbox erstellen wenn nicht vorhanden
-                if not nb.dcim.device_roles.filter(slug=cdp_device_role_slug):
+                if not nb.dcim.device_roles.filter(slug=cdp_device_role_slug.lower()):
                         print(f"[+] Role {cdp_device_role} not in Netbox, creating it now")
-                        nb.dcim.device_roles.create(name=cdp_device_role, slug=cdp_device_role_slug, color=pickColor())
-                        tmp = nb.dcim.device_roles.get(slug=cdp_device_role_slug)
+                        nb.dcim.device_roles.create(name=cdp_device_role, slug=cdp_device_role_slug.lower(), color=pickColor())
+                        tmp = nb.dcim.device_roles.get(slug=cdp_device_role_slug.lower())
                         rl = tmp.id
+                # Wenn das Gerät "Switch" im ersten Wort hat, dann wird es die Switch Rolle bekommen
+                if cdp_device_role_slug.lower().split('_')[0] == 'switch':
+                        rl = 1
                 else:
-                        tmp = nb.dcim.device_roles.get(slug=cdp_device_role_slug)
+                        tmp = nb.dcim.device_roles.get(slug=cdp_device_role_slug.lower())
                         rl = tmp.id
 
                 # Prefix des Nachbarn aus IP Adresse holen und schauen ob Prefix in Netbox existiert
@@ -353,13 +392,20 @@ def discoverCiscoDevice(nb,tb,device_name):
                 # Richtig komisch, dass die filter keys anders sind als die, die ich beim erstellen setze
                 cdp_port_id_int = nb.dcim.interfaces.get(name=cdp_port_id, device_id=cdp_device_host.id)
                 cdp_local_interface_int = nb.dcim.interfaces.get(name=cdp_local_interface, device_id=host.id)
+
+                #Muss beide Richtungen checken, wenn beide Terminierungsobjekte Switche sind
                 existing_cables = nb.dcim.cables.filter(termination_a_id=cdp_local_interface_int.id, termination_b_id=cdp_port_id_int.id)
-                if not existing_cables:
+                existing_cables_b = nb.dcim.cables.filter(termination_a_id=cdp_port_id_int.id, termination_b_id=cdp_local_interface_int.id)
+                if not existing_cables and not existing_cables_b:
                         print(f"[+] Creating Cable between {cdp_local_interface} and {cdp_port_id}")
                         nb.dcim.cables.create(a_terminations=[{'object_type':'dcim.interface','object_id':cdp_local_interface_int.id}], b_terminations=[{'object_type':'dcim.interface','object_id':cdp_port_id_int.id}], status='connected')
                 else:
                         print(f"[-] Cable between {cdp_local_interface} and {cdp_port_id} already exists")
         print(f"[***] Finished processing {hostname}")
+
+# Testbed erstellen und dann an Genie weitergeben
+tb = MakeTestbed()
+tb = load(tb)
 
 # ---- Parsing und Verarbeitung der Daten ----
 for device_name,device in tb.devices.items():
