@@ -1,4 +1,4 @@
-from extras.scripts import Script, StringVar
+from extras.scripts import Script, StringVar, ChoiceVar
 from dcim.models import Device, DeviceRole, DeviceType, Site, Interface
 from ipam.models import IPAddress
 
@@ -8,9 +8,11 @@ class NetboxTestbedMaker(Script):
     class Meta:
         name = "Netbox Device Maker"
         description = "Create a barebone device in Netbox for further use by Cisco Discovery script."
+        scheduling_enabled = False
 
-    dev_name = StringVar(label="Device Hostname", description="Enter the hostname precisely!")
-    dev_ip = StringVar(label="Device IP", description="Enter the IP address of the device.")
+    dev_name = StringVar(label="Device Hostname", description="Enter the hostname precisely!", required=True)
+    dev_ip = StringVar(label="Device IP", description="Enter the IP address of the device.", required=True)
+    os = ChoiceVar(label="Device OS", choices=[('ios', 'IOS'), ('nxos', 'NX-OS'), ('iosxe', 'IOS-XE')], required=True, default='ios')
 
     def run(self, data, commit):
         dev_role = DeviceRole.objects.get(name="Switch")
@@ -52,9 +54,17 @@ class NetboxTestbedMaker(Script):
 
         if ip.assigned_object_id is None:
             interface.ip_addresses.add(ip)
-        
+            interface.save()
+
         if device.primary_ip4 is None:
             device.primary_ip4 = ip
             device.save()
 
+        if data['os'] == 'ios':
+            device.custom_field_data = {'OS': 'IOS'}
+        elif data['os'] == 'nxos':
+            device.custom_field_data = {'OS': 'NX-OS'}
+        elif data['os'] == 'iosxe':
+            device.custom_field_data = {'OS': 'IOS-XE'}
+        device.save()
         self.log_info("Device created: " + data['dev_name'])
